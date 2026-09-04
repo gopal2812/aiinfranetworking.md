@@ -1779,6 +1779,610 @@ Is RoCE inherently lossless?
 Why is packet loss particularly expensive for distributed AI training?
 What happens when a RoCE packet is dropped?
 If RoCE has retransmission, why do we need PFC?
+
+"RoCEv2 provides reliability through end-to-end mechanisms such as ACK/NACK and retransmission, but retransmission is reactive. PFC is a link-level mechanism used to prevent buffer overflow and packet loss for the loss-sensitive RoCE traffic class. In a well-designed RoCE network, ECN/DCQCN provides congestion control, while PFC provides a loss-avoidance safety mechanism; retransmission handles residual losses."
+
+ RoCE Network
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+         ECN        PFC     Retransmission
+          │          │          │
+          ▼          ▼          ▼
+      Congestion   Prevent     Recover
+      signaling    drops       lost packets
+          │
+          ▼
+       DCQCN
+          │
+          ▼
+    Reduce sender rate
+
+    The answer is: ECN/DCQCN is a feedback-control mechanism; PFC is a last-resort loss-prevention mechanism. They operate at different timescales and have different failure modes.
+
+1. ECN/DCQCN reacts, but not instantaneously
+
+Consider:
+
+GPU Sender
+   │
+   │ packets at 400 Gb/s
+   ▼
+Switch
+   │
+   │ Queue building
+   ▼
+Receiver
+
+The sequence is roughly:
+
+Queue starts growing
+       ↓
+Switch detects threshold
+       ↓
+ECN marks packets
+       ↓
+Receiver sees ECN
+       ↓
+Congestion notification
+       ↓
+Sender receives feedback
+       ↓
+DCQCN reduces rate
+
+There is a feedback delay.
+
+During that delay, packets continue arriving.
+
+If the available buffer/headroom is insufficient:
+
+Queue
+████████████████████████
+                         ↑
+                    buffer full
+                         ↓
+                       DROP
+
+PFC is designed to prevent that final step.
+
+2. PFC provides a local, fast reaction
+
+PFC doesn't need an end-to-end feedback loop.
+
+The congested switch can essentially say:
+
+             PFC
+              ↓
+Sender ───────────────► Switch
+   ▲                     │
+   │                     │
+   └──── PAUSE ◄─────────┘
+
+The sender temporarily stops transmitting that priority.
+
+So:
+
+ECN/DCQCN:
+"Please slow down because congestion is developing."
+
+PFC:
+"STOP NOW because my buffer is almost full."
+
+That's the fundamental difference.
+
+3. Why is packet loss particularly undesirable for RoCE?
+
+TCP is designed around packet loss:
+
+TCP
+packet loss
+   ↓
+retransmission
+   ↓
+continue
+
+RoCE can also recover from lost packets, but RDMA has much tighter latency/performance requirements.
+
+For example:
+
+GPU0 ──┐
+GPU1 ──┤
+GPU2 ──┼── AllReduce
+GPU3 ──┘
+
+Suppose one flow experiences loss:
+PFC itself can create problems.
+
+Imagine:
+
+             Switch S1
+                │
+         PFC PAUSE
+                │
+                ▼
+             Switch S0
+          ┌───────────┐
+          │   Queue   │
+          └───────────┘
+             │
+       other traffic
+
+The pause propagates upstream.
+
+You can get:
+
+Congested receiver
+       ↓
+     PFC
+       ↓
+ upstream switch pauses
+       ↓
+ more queues build
+       ↓
+ other flows affected
+       ↓
+ congestion spreads
+
+This is called PFC head-of-line blocking / congestion spreading.
+
+In extreme cases you can get a PFC storm.
+
+Therefore, modern RoCE networks generally don't want PFC to be the primary congestion-control mechanism.
+
+5. Then what is the ideal division of responsibility?
+
+Think of it as three layers:
+
+                 RoCE congestion architecture
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+         ECN + DCQCN              PFC
+              │                     │
+       Primary mechanism       Safety mechanism
+       for congestion          against packet loss
+              │                     │
+              └──────────┬──────────┘
+                         │
+                   Retransmission
+                         │
+                   Last resort
+ECN/DCQCN
+
+Normal operation
+
+Queue increasing
+     ↓
+ECN marking
+     ↓
+DCQCN
+     ↓
+reduce injection rate
+PFC
+
+Emergency protection
+
+Queue approaching exhaustion
+     ↓
+PFC
+     ↓
+temporarily stop traffic
+     ↓
+prevent packet drop
+Retransmission
+
+Failure recovery
+
+Packet actually lost
+     ↓
+detect loss
+     ↓
+retransmit
+6. The critical concept: headroom
+
+This is probably the most important concept for your interview.
+
+PFC requires the switch to maintain enough buffer headroom to absorb packets that are already in flight after sending PAUSE.
+
+Suppose:
+
+Sender ─────── 400 Gb/s ───────► Switch
+
+The switch sends PFC PAUSE, but packets already transmitted cannot magically disappear.
+
+Therefore:
+
+PFC threshold
+       │
+       ▼
+██████████████████
+       │
+       │  headroom
+       ▼
+████████
+       │
+       ▼
+    buffer limit
+
+You need sufficient headroom for:
+
+propagation delay
+serialization delay
+switch processing
+NIC response time
+packets already in flight
+
+If headroom is badly configured:
+
+PFC triggered
+      ↓
+buffer still fills
+      ↓
+DROP
+
+So PFC does not guarantee losslessness by itself.
+
+7. Why not simply make ECN extremely aggressive?
+
+You might ask:
+
+"Why not set the ECN threshold very low and eliminate PFC?"
+
+You can reduce the probability of overflow, but you cannot completely eliminate the problem.
+
+There are several reasons:
+
+Feedback is delayed
+ECN → receiver → sender → rate reduction
+
+takes time.
+
+Traffic can be bursty
+
+A GPU/NIC can inject traffic very rapidly.
+
+Multiple senders can converge simultaneously
+GPU0 ─┐
+GPU1 ─┤
+GPU2 ─┼──► Switch ──► GPU10
+GPU3 ─┤
+GPU4 ─┘
+
+Even if each sender individually reacts correctly, the aggregate arrival rate can temporarily exceed the output capacity.
+
+Control loops aren't perfect
+
+DCQCN is a distributed feedback-control algorithm. Multiple flows reacting simultaneously can create oscillations or transient queue growth.
+
+PFC provides the hard safety boundary.
+
+8. Best mental model
+
+Think of a car:
+
+              Car
+               │
+      ┌────────┼────────┐
+      │        │        │
+      ▼        ▼        ▼
+ Accelerator  Brake   Crash protection
+      │        │        │
+      │        │        │
+      ▼        ▼        ▼
+ ECN/DCQCN    PFC   Retransmission
+
+More accurately:
+
+ECN/DCQCN
+   ↓
+"Slow down"
+
+PFC
+   ↓
+"Stop temporarily"
+
+Retransmission
+   ↓
+"Something went wrong; recover"
+Staff Engineer interview answer
+
+I'd answer it like this:
+
+"ECN/DCQCN is the primary congestion-control mechanism in a RoCE network, but it is an end-to-end feedback loop and therefore has reaction latency. During bursts or synchronized GPU traffic, the queue can continue growing after ECN marking and before the sender reduces its rate. PFC provides a local, fast backpressure mechanism that prevents the loss-sensitive RoCE queue from exhausting its buffer. So ECN/DCQCN handles congestion proactively, PFC provides a loss-prevention safety net, and RoCE retransmission handles residual packet loss. However, PFC must be carefully scoped and engineered with sufficient headroom because excessive PFC can cause head-of-line blocking and congestion spreading."
+
+The interview answer I'd give
+
+"In RoCE, the switch acts as the congestion point and marks ECN CE when the queue crosses its congestion threshold. The receiving NIC detects the CE-marked RoCE packet and generates a CNP back to the sender. The sender NIC's DCQCN reaction point maintains a congestion state, typically alpha, and uses it to reduce the per-flow injection rate. When CNPs disappear, the NIC gradually increases the rate again.
+
+The thresholds are fundamentally a buffer-and-feedback-delay problem. ECN must be triggered early enough that the end-to-end control loop can react before the queue exhausts. A first-order estimate of required headroom is incoming bandwidth multiplied by the worst-case reaction time, with additional allowance for packets already in flight, switch/NIC processing and burstiness. PFC is then configured closer to buffer exhaustion, leaving enough headroom for traffic that continues arriving after the pause is generated.
+
+So ECN/DCQCN is the primary closed-loop congestion-control mechanism, while PFC is the fast local safety mechanism against buffer overflow."
+
+One formula to remember
+Required headroom ≈
+        Incoming bandwidth
+        ×
+        Worst-case reaction time
+
+        nd the conceptual ordering:
+
+        ECN
+         ↓
+   DCQCN reacts
+         ↓
+   queue controlled
+         ↓
+      normally
+         
+If reaction is too slow:
+
+        PFC
+         ↓
+   protect headroom
+
+If everything fails:
+
+   packet loss
+         ↓
+   retransmission
+
+One nuance: there is no single standards-mandated “correct” ECN or PFC threshold formula for every RoCE fabric. ECN marking behavior is an implementation/configuration choice, and real deployments tune thresholds to their switch buffer architecture, topology, workload burstiness and desired latency.
+
+You shouldn't blindly use RTT.
+
+The actual required headroom is closer to:
+
+Headroom ≥
+    packets already in flight
+  + propagation delay
+  + serialization delay
+  + switch processing
+  + PFC generation/processing
+  + NIC reaction delay
+
+A simplified engineering approximation:
+
+H ≈ R × T_reaction
+
+where:
+
+H = required headroom
+R = incoming rate
+T = reaction time
+
+For multiple simultaneous senders:
+
+H ≈ Σ Ri × Ti
+
+or, conservatively:
+
+H ≈ Aggregate arrival rate × worst-case reaction time
+
+2. Step 1 — Switch detects congestion
+
+Suppose a 400-Gb/s switch port is transmitting toward a receiver, but several GPUs are sending toward it:
+
+GPU0 ──────┐
+GPU1 ──────┤
+GPU2 ──────┼────► Switch ─────► GPU10
+GPU3 ──────┤
+GPU4 ──────┘
+
+The output queue starts increasing:
+
+Queue:
+
+10 KB
+20 KB
+40 KB
+80 KB
+120 KB
+...
+
+The switch has an ECN marking policy.
+
+A simple example:
+
+Kmin = 100 KB
+Kmax = 200 KB
+
+Then:
+
+Queue < 100 KB
+       │
+       └── no ECN
+
+100–200 KB
+       │
+       └── increasing ECN marking probability
+
+> 200 KB
+       │
+       └── essentially all eligible packets marked
+
+Actual implementations can use static or dynamic thresholds and different marking algorithms. NVIDIA documents both minimum/maximum ECN thresholds and dynamic ECN mechanisms.
+
+3. Step 2 — Switch sets the ECN CE bit
+
+RoCEv2 runs over IP, so the switch can mark the packet's IP header with:
+
+ECN = CE
+
+Conceptually:
+
+Before:
+
+RoCE packet
+┌─────────────────────────┐
+│ IP │ UDP │ RoCE │ Data  │
+└─────────────────────────┘
+       ECN = ECT
+
+
+After switch:
+
+┌─────────────────────────┐
+│ IP │ UDP │ RoCE │ Data  │
+└─────────────────────────┘
+       ECN = CE
+             ↑
+       congestion!
+
+The important point:
+
+The switch does not directly tell the sender to reduce its rate. It marks the packet.
+
+4. Step 3 — Receiver sees the CE-marked packet
+
+The destination NIC receives:
+
+RoCE packet
+      │
+      ▼
+ECN = CE
+      │
+      ▼
+Notification Point
+
+The receiver's RoCE congestion-control logic recognizes that the packet encountered congestion.
+
+It then generates a CNP — Congestion Notification Packet back toward the sender.
+
+Sender                                      Receiver
+
+   ──────── data ───────────────────────────►
+             ECN = CE
+
+   ◄──────────── CNP ───────────────────────
+
+This is an important distinction:
+
+CNP is not the same thing as the ECN-marked data packet.
+
+The switch marks the data packet.
+
+The receiver generates the CNP.
+
+5. Step 4 — CNP reaches the sender NIC
+
+Now the sender NIC receives:
+
+CNP
+ │
+ ▼
+Reaction Point (RP)
+ │
+ ▼
+DCQCN state
+
+This happens inside the NIC hardware/firmware, rather than requiring the CPU to process every congestion notification.
+
+Modern NVIDIA adapters expose DCQCN parameters for this behavior.
+
+6. Step 5 — DCQCN maintains α
+
+This is the interesting part.
+
+DCQCN maintains a congestion state variable called:
+
+α (alpha)
+
+Think of α as:
+
+α ≈ "How serious does congestion appear to be?"
+
+If CNPs keep arriving:
+
+CNP
+ ↓
+α increases
+ ↓
+CNP
+ ↓
+α increases
+ ↓
+CNP
+ ↓
+α increases
+
+If congestion disappears:
+
+No CNP
+ ↓
+α decreases
+ ↓
+No CNP
+ ↓
+α decreases
+
+NVIDIA's implementation updates α periodically, with the update period tied to a configured RTT-related parameter.
+
+A simplified conceptual equation is:
+
+CNP received:
+
+αnew = (1-g) αold + g
+
+No CNP:
+
+αnew = (1-g) αold
+
+So α becomes a smoothed estimate of congestion severity.
+
+7. Step 6 — α determines the rate reduction
+
+Now the sender's NIC calculates a new transmission rate.
+
+A simplified DCQCN-style relationship is:
+
+New Rate ≈ Old Rate × (1 - α / 2^g_d)
+
+subject to configured limits.
+
+NVIDIA documents the rate-decrease logic using α together with parameters such as RPG_GD, RPG_MIN_DEC_FAC, and RPG_MIN_RATE.
+
+For example, conceptually:
+
+Current rate = 400 Gb/s
+α = small
+       ↓
+small reduction
+
+Current rate = 400 Gb/s
+α = large
+       ↓
+large reduction
+
+So:
+
+ECN frequency/severity
+        ↓
+       CNP
+        ↓
+       α
+        ↓
+rate reduction
+
+9. Now the really important part: threshold calculation
+
+There isn't one universal formula for RoCE ECN/PFC thresholds.
+
+They're normally engineered from:
+
+link speed
+RTT
+switch pipeline latency
+NIC reaction time
+propagation delay
+packet size
+number of senders
+buffer architecture
+burst size
+desired queueing latency
+
+The basic physical constraint is:
+
+How many bytes can arrive during the time it takes the congestion-control mechanism to react?
 What happens if PFC is disabled?
 What happens if PFC is enabled everywhere?
 What is a PFC storm?
@@ -1788,7 +2392,7 @@ How much buffer/headroom is required for PFC?
 What causes PFC deadlock?
 How would you troubleshoot a network experiencing excessive PFC pause frames?
 How would you determine whether packet loss is caused by congestion or a physical link problem?
-2. DCB — Staff-Level Questions
+3. DCB — Staff-Level Questions
 What is DCB and why was it introduced?
 Explain:
 PFC
@@ -1815,7 +2419,7 @@ Control traffic
 What is ETS actually solving?
 Why isn't PFC sufficient by itself?
 Is DCBX mandatory for a RoCE deployment?
-3. ECN / DCQCN — Very Important
+4. ECN / DCQCN — Very Important
 Explain ECN from packet generation to congestion response.
 Where is ECN implemented?
 What exactly does the switch do when congestion occurs?
@@ -1831,7 +2435,7 @@ What happens if ECN thresholds are too low?
 What happens if PFC triggers before ECN can control the sender?
 How would you tune ECN/DCQCN for an AI cluster?
 How would you identify whether DCQCN is actually reducing congestion?
-4. RoCEv2 — Deep Questions
+5. RoCEv2 — Deep Questions
 Explain the complete RoCEv2 packet structure.
 Ethernet
    ↓
@@ -1855,7 +2459,7 @@ Can RoCEv2 use ECMP?
 What happens to RoCE packets when they traverse multiple routers?
 What fields are used to identify a RoCE flow?
 How does ECMP affect distributed AI traffic?
-5. RDMA — Staff-Level Questions
+6. RDMA — Staff-Level Questions
 What exactly does RDMA mean?
 What is kernel bypass?
 What is zero-copy?
@@ -1892,7 +2496,7 @@ remote_address + length > registered_region
 What is the difference between lkey and rkey?
 How does RDMA provide memory protection?
 How does RDMA interact with the IOMMU?
-6. GPU Direct RDMA
+7. GPU Direct RDMA
 
 These are particularly good Staff Engineer-level questions.
 
