@@ -2392,6 +2392,41 @@ How much buffer/headroom is required for PFC?
 What causes PFC deadlock?
 How would you troubleshoot a network experiencing excessive PFC pause frames?
 How would you determine whether packet loss is caused by congestion or a physical link problem?
+        Retransmissions
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+         Congestion?             Physical?
+              │                       │
+        ECN ↑ / PFC ↑            CRC/FCS ↑
+        Queue ↑                  FEC ↑
+        CNP ↑                    symbol ↑
+        DCQCN ↓rate             optical anomalies
+        "I would first localize the PFC events by switch, port and priority, then correlate PFC with queue occupancy, ECN marking, CNPs and DCQCN rate reduction. If queue depth, ECN, CNP and PFC rise together while physical error counters remain clean, I would treat it as congestion and investigate oversubscription, traffic concentration, burstiness and PFC propagation.
+
+For packet loss, I would separate congestion loss from physical loss by correlating RoCE retransmissions with queue/ECN/PFC counters versus FEC, CRC/FCS, PCS, symbol and optical counters. Congestion typically produces queue buildup, ECN and PFC without physical errors; a bad link produces FEC/PCS/CRC/symbol errors even when queues are healthy.
+
+Finally, I would trace the PFC pause upstream to determine whether the original congestion is localized or whether PFC itself is propagating congestion through the fabric. I would only tune PFC/ECN thresholds after identifying the actual root cause."
+
+The mental model to memorize
+                 PACKET LOSS
+                     │
+             ┌───────┴────────┐
+             │                │
+        CONGESTION          PHYSICAL
+             │                │
+       Queue ↑              FEC ↑
+       ECN ↑                PCS ↑
+       CNP ↑                CRC ↑
+       PFC ↑                Symbol ↑
+       DCQCN ↓rate         Optical issue
+             │                │
+             ▼                ▼
+       Fix traffic/       Fix cable/optic/
+       congestion         port/PHY
+
+       
+
 3. DCB — Staff-Level Questions
 What is DCB and why was it introduced?
 Explain:
