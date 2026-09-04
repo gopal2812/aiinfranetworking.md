@@ -2444,6 +2444,45 @@ PFC
 ETS
 DSCP
 802.1p
+
+
+  ┌───────────────────────┐
+             │       Routing         │
+             │   BGP / OSPF / etc.   │
+             └───────────┬───────────┘
+                         │
+                    determines
+                       PATH
+                         │
+                         ▼
+             ┌───────────────────────┐
+             │        QoS/DCB        │
+             └───────────┬───────────┘
+                         │
+                  classification
+                         │
+                         ▼
+                 Priority / TC
+                         │
+              ┌──────────┼───────────┐
+              ▼          ▼           ▼
+             ETS        ECN         PFC
+              │          │           │
+           bandwidth   feedback    pause
+                         │
+                         ▼
+                      DCQCN
+                         │
+                         ▼
+                    rate control
+                         │
+                         ▼
+                 RoCE retransmit
+                  if loss occurs
+
+                  
+
+   
 How would you map RoCE traffic to a lossless priority?
 What happens if RoCE traffic shares a queue with TCP traffic?
 How would you design QoS for:
@@ -2454,7 +2493,7 @@ Control traffic
 What is ETS actually solving?
 Why isn't PFC sufficient by itself?
 Is DCBX mandatory for a RoCE deployment?
-4. ECN / DCQCN — Very Important
+5. ECN / DCQCN — Very Important
 Explain ECN from packet generation to congestion response.
 Where is ECN implemented?
 What exactly does the switch do when congestion occurs?
@@ -2470,7 +2509,7 @@ What happens if ECN thresholds are too low?
 What happens if PFC triggers before ECN can control the sender?
 How would you tune ECN/DCQCN for an AI cluster?
 How would you identify whether DCQCN is actually reducing congestion?
-5. RoCEv2 — Deep Questions
+6. RoCEv2 — Deep Questions
 Explain the complete RoCEv2 packet structure.
 Ethernet
    ↓
@@ -2494,7 +2533,7 @@ Can RoCEv2 use ECMP?
 What happens to RoCE packets when they traverse multiple routers?
 What fields are used to identify a RoCE flow?
 How does ECMP affect distributed AI traffic?
-6. RDMA — Staff-Level Questions
+7. RDMA — Staff-Level Questions
 What exactly does RDMA mean?
 What is kernel bypass?
 What is zero-copy?
@@ -2531,7 +2570,7 @@ remote_address + length > registered_region
 What is the difference between lkey and rkey?
 How does RDMA provide memory protection?
 How does RDMA interact with the IOMMU?
-7. GPU Direct RDMA
+8. GPU Direct RDMA
 
 These are particularly good Staff Engineer-level questions.
 
