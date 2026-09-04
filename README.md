@@ -2436,6 +2436,48 @@ DCBX
 Where does DCB operate in the OSI model?
 Is DCB a routing protocol?
 How is DCB different from QoS?
+"DCB is not a routing protocol. Routing protocols determine the path; DCB controls how traffic is classified, queued, scheduled and flow-controlled on Ethernet links. QoS is the broader concept, while DCB provides standardized mechanisms such as 802.1p/PCP, PFC and ETS.
+
+For RoCE, DSCP or VLAN PCP can be used to classify traffic. That classification is mapped to an internal priority and then to a traffic class/queue. ETS determines how bandwidth is allocated among traffic classes, while PFC provides per-priority pause to prevent buffer overflow. ECN marks congestion and DCQCN uses that feedback to reduce the sender's rate.
+
+So the chain is: DSCP/PCP → priority → traffic class → ETS/PFC/ECN. Routing determines where the packet goes; DCB/QoS determines how the packet is treated along the way."
+
+The one diagram I'd memorize
+DSCP / 802.1p(PCP)
+        │
+        ▼
+    Classification
+        │
+        ▼
+     Priority
+        │
+        ▼
+   Traffic Class
+        │
+   ┌────┼─────┐
+   ▼    ▼     ▼
+  ETS  ECN    PFC
+   │    │      │
+   │    │      └── Pause
+   │    │
+   │    └──────── Mark
+   │                 │
+   │              DCQCN
+   │                 │
+   └────────────── Rate control
+
+And above all of this:
+
+BGP / OSPF / IS-IS
+        │
+        ▼
+     Routing
+        │
+        ▼
+     Path selection
+
+That's the clean separation an interviewer is usually looking for.
+
 What happens if the NIC and switch have different PFC configurations?
 What is the relationship between:
 Priority
@@ -2480,8 +2522,66 @@ DSCP
                  RoCE retransmit
                   if loss occurs
 
-                  
+            # DSCP      
+DSCP
 
+DSCP is different from 802.1p.
+
+DSCP lives in the IP header, while PCP lives in the Ethernet VLAN header.
+
+Ethernet frame
+┌───────────────┐
+│ VLAN / PCP    │ ← Layer 2
+├───────────────┤
+│ IP / DSCP     │ ← Layer 3
+├───────────────┤
+│ UDP           │
+├───────────────┤
+│ RoCE          │
+└───────────────┘
+
+DSCP has 6 bits, giving:
+
+0–63
+
+So:
+
+802.1p / PCP → 3 bits → 8 values
+
+DSCP          → 6 bits → 64 values
+
+For RoCEv2, DSCP is particularly useful because RoCEv2 is IP/UDP based and can be classified across routed IP networks.
+
+7. Priority vs DSCP
+
+Think of DSCP as a marking/classification value, while priority is the internal traffic-treatment concept.
+
+For example:
+
+RoCE packet
+    │
+    │ DSCP = 26
+    ▼
+Switch classification
+    │
+    ▼
+Internal Priority = 3
+    │
+    ▼
+Traffic Class 3
+
+Or in a VLAN environment:
+
+RoCE packet
+    │
+    │ PCP = 3
+    ▼
+Priority = 3
+    │
+    ▼
+Traffic Class 3
+
+The actual mappings are configurable.
    
 How would you map RoCE traffic to a lossless priority?
 What happens if RoCE traffic shares a queue with TCP traffic?
