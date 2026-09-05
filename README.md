@@ -4001,3 +4001,55 @@ SD-WAN Edge = Enforcement + Forwarding
 WAN links = Data Plane
 
 That separation is the key to explaining SD-WAN control-plane integration at Staff Engineer level.
+
+
+  			  BGP
+               │
+       ┌───────┴───────┐
+       │               │
+      iBGP            eBGP
+       │               │
+  Same AS           Different AS
+       │               │
+   Internal         Inter-AS
+   routing          routing
+       │               │
+  RR / full mesh    AS_PATH
+       │               │
+       └───────┬───────┘
+               ↓
+             ECMP
+               ↓
+        AI Leaf-Spine Fabric
+
+A multi-VPC environment is required for high-performance accelerator machines to handle this specialized hardware design. The specific configuration depends on the GPU machine type and its networking stack:
+
+A4X, A4, and A3 Ultra (GPUDirect RDMA)
+
+Three VPCs:
+
+Default VPC
+
+One additional VPC for host traffic
+
+One Shared VPC for all GPU-to-GPU traffic (with RDMA network profile enabled).
+
+A3 Mega (GPUDirect-TCPXO)
+
+Eight separate VPCs dedicated to the GPU NICs for high-bandwidth communication.
+
+A3 High (GPUDirect-TCPX)
+
+Four separate VPCs dedicated to the GPU NICs for high-bandwidth
+
+"Why would you use multiple VPCs in a large AI networking environment?"
+
+I'd answer:
+
+"I'd use multiple VPCs or equivalent VRF-based routing domains to provide logical isolation between different workload and administrative domains while sharing the same physical Clos fabric. Each VPC can have independent addressing, routing policy, security controls and QoS treatment. BGP can distribute reachability within the appropriate routing context, while the underlying Clos fabric provides ECMP path diversity. The key architectural benefit is not only multi-tenancy and security, but also failure and policy isolation—an incorrect route, congestion domain, or operational change in one environment should have a bounded blast radius rather than affecting the entire AI cluster."
+
+One sentence to remember
+
+Multi-VPC is the logical isolation layer; VRF separates routing tables, BGP distributes reachability, Clos provides physical path diversity, and ECMP exploits that diversity.
+
+		
